@@ -25,6 +25,8 @@ export default function CompleteSchoolChat() {
   const [errorMessage, setErrorMessage] = useState('');
 
   // Chat app states
+  const [activeTab, setActiveTab] = useState('school-chat'); // 'dms', 'school-chat', 'friends', 'proxy', 'music'
+  const [previousTab, setPreviousTab] = useState('school-chat');
   const [activeChannel, setActiveChannel] = useState('general');
   const [activeView, setActiveView] = useState('channels');
   const [messages, setMessages] = useState({});
@@ -42,6 +44,15 @@ export default function CompleteSchoolChat() {
   const [dmConversations, setDmConversations] = useState([]);
   const [showCreateChannel, setShowCreateChannel] = useState(false);
   const [newChannelName, setNewChannelName] = useState('');
+  
+  // Friends system states
+  const [friends, setFriends] = useState([]);
+  const [friendRequests, setFriendRequests] = useState({ sent: [], received: [] });
+  const [showAddFriend, setShowAddFriend] = useState(false);
+  const [friendRelationship, setFriendRelationship] = useState('');
+  const [friendSearchName, setFriendSearchName] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  
   const messagesEndRef = useRef(null);
 
   // Auto slide-out after 3 seconds
@@ -63,6 +74,8 @@ export default function CompleteSchoolChat() {
       loadMessages();
       loadOnlineUsers();
       loadDMs();
+      loadFriends();
+      loadFriendRequests();
       markUserOnline();
 
       return () => {
@@ -76,6 +89,19 @@ export default function CompleteSchoolChat() {
       scrollToBottom();
     }
   }, [messages, activeChannel, isLoggedIn]);
+
+  // Poll for new messages and friend requests
+  useEffect(() => {
+    if (isLoggedIn && currentUser) {
+      const interval = setInterval(() => {
+        loadMessages();
+        loadFriendRequests();
+        loadOnlineUsers();
+      }, 3000); // Refresh every 3 seconds
+
+      return () => clearInterval(interval);
+    }
+  }, [isLoggedIn, currentUser, activeChannel]);
 
   // Login handlers
   const handleInputChange = (e) => {
@@ -193,10 +219,15 @@ export default function CompleteSchoolChat() {
     try {
       const allMessages = {};
       for (const channel of channels) {
-        const result = await window.storage.get(`messages:${channel.id}`, true);
-        if (result) {
-          allMessages[channel.id] = JSON.parse(result.value);
-        } else {
+        try {
+          const result = await window.storage.get(`messages:${channel.id}`, true); // Use shared storage
+          if (result) {
+            allMessages[channel.id] = JSON.parse(result.value);
+          } else {
+            allMessages[channel.id] = [];
+          }
+        } catch (error) {
+          // If channel doesn't have messages yet, initialize empty array
           allMessages[channel.id] = [];
         }
       }
@@ -343,6 +374,169 @@ export default function CompleteSchoolChat() {
     setErrorMessage('');
   };
 
+  // Friends system functions
+  const loadFriends = async () => {
+    try {
+      const result = await window.storage.get(`friends:${currentUser.name.toLowerCase()}`);
+      if (result) {
+        setFriends(JSON.parse(result.value));
+      }
+    } catch (error) {
+      console.error('Error loading friends:', error);
+    }
+  };
+
+  const loadFriendRequests = async () => {
+    try {
+      const result = await window.storage.get(`friend-requests:${currentUser.name.toLowerCase()}`);
+      if (result) {
+        setFriendRequests(JSON.parse(result.value));
+      }
+    } catch (error) {
+      console.error('Error loading friend requests:', error);
+    }
+  };
+
+  const searchForUser = async () => {
+    if (!friendSearchName.trim()) return;
+    
+    try {
+      const accountKey = `user:${friendSearchName.toLowerCase().trim()}`;
+      const result = await window.storage.get(accountKey);
+      
+      if (result && result.value) {
+        const userData = JSON.parse(result.value);
+        if (userData.name.toLowerCase() !== currentUser.name.toLowerCase()) {
+          setSearchResults([userData]);
+        } else {
+          setSearchResults([]);
+          alert("You can't add yourself as a friend!");
+        }
+      } else {
+        setSearchResults([]);
+        alert('User not found. Make sure they have an account!');
+      }
+    } catch (error) {
+      console.error('Error searching for user:', error);
+      setSearchResults([]);
+      alert('User not found. Make sure they have an account!');
+    }
+  };
+
+  const sendFriendRequest = async (targetUser) => {
+    try {
+      // Check if already friends
+      if (friends.some(f => f.name.toLowerCase() === targetUser.name.toLowerCase())) {
+        alert('You are already friends with this user!');
+        return;
+      }
+
+      // Check if request already sent
+      if (friendRequests.sent.some(r => r.to.toLowerCase() === targetUser.name.toLowerCase())) {
+        alert('Friend request already sent!');
+        return;
+      }
+
+      // Add to sent requests
+      const newSentRequest = {
+        to: targetUser.name,
+        relationship: friendRelationship,
+        sentAt: new Date().toISOString()
+      };
+
+      const updatedRequests = {
+        ...friendRequests,
+        sent: [...friendRequests.sent, newSentRequest]
+      };
+
+      await window.storage.set(`friend-requests:${currentUser.name.toLowerCase()}`, JSON.stringify(updatedRequests));
+      setFriendRequests(updatedRequests);
+
+      // Add to target user's received requests
+      try {
+        const targetRequestsResult = await window.storage.get(`friend-requests:${targetUser.name.toLowerCase()}`);
+        let targetRequests = targetRequestsResult ? JSON.parse(targetRequestsResult.value) : { sent: [], received: [] };
+        
+        targetRequests.received = [
+          ...targetRequests.received,
+          {
+            from: currentUser.name,
+            relationship: friendRelationship,
+            sentAt: new Date().toISOString()
+          }
+        ];
+
+        await window.storage.set(`friend-requests:${targetUser.name.toLowerCase()}`, JSON.stringify(targetRequests));
+      } catch (error) {
+        console.error('Error adding to target received requests:', error);
+      }
+
+      alert('Friend request sent!');
+      setShowAddFriend(false);
+      setFriendRelationship('');
+      setFriendSearchName('');
+      setSearchResults([]);
+    } catch (error) {
+      console.error('Error sending friend request:', error);
+      alert('Error sending friend request. Please try again.');
+    }
+  };
+
+  const acceptFriendRequest = async (fromUser, relationship) => {
+    try {
+      // Add to both users' friends lists
+      const newFriend = {
+        name: fromUser,
+        relationship: relationship,
+        addedAt: new Date().toISOString()
+      };
+
+      const updatedFriends = [...friends, newFriend];
+      await window.storage.set(`friends:${currentUser.name.toLowerCase()}`, JSON.stringify(updatedFriends));
+      setFriends(updatedFriends);
+
+      // Add to other user's friends list
+      try {
+        const otherUserFriendsResult = await window.storage.get(`friends:${fromUser.toLowerCase()}`);
+        let otherUserFriends = otherUserFriendsResult ? JSON.parse(otherUserFriendsResult.value) : [];
+        otherUserFriends.push({
+          name: currentUser.name,
+          relationship: relationship,
+          addedAt: new Date().toISOString()
+        });
+        await window.storage.set(`friends:${fromUser.toLowerCase()}`, JSON.stringify(otherUserFriends));
+      } catch (error) {
+        console.error('Error updating other user friends:', error);
+      }
+
+      // Remove from received requests
+      const updatedRequests = {
+        ...friendRequests,
+        received: friendRequests.received.filter(r => r.from.toLowerCase() !== fromUser.toLowerCase())
+      };
+      await window.storage.set(`friend-requests:${currentUser.name.toLowerCase()}`, JSON.stringify(updatedRequests));
+      setFriendRequests(updatedRequests);
+
+      alert('Friend request accepted!');
+    } catch (error) {
+      console.error('Error accepting friend request:', error);
+      alert('Error accepting friend request. Please try again.');
+    }
+  };
+
+  const handleTabChange = (newTab) => {
+    setPreviousTab(activeTab);
+    setActiveTab(newTab);
+    
+    // Reset friends add flow when switching away from friends tab
+    if (newTab !== 'friends') {
+      setShowAddFriend(false);
+      setFriendRelationship('');
+      setFriendSearchName('');
+      setSearchResults([]);
+    }
+  };
+
   // Render chat app if logged in
   if (isLoggedIn && currentUser) {
     const currentMessages = messages[activeChannel] || [];
@@ -352,10 +546,882 @@ export default function CompleteSchoolChat() {
         height: '100vh',
         background: '#0a0a0a',
         display: 'flex',
+        flexDirection: 'column',
         fontFamily: "'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif",
         color: '#fff',
         overflow: 'hidden'
       }}>
+        {/* Top Navigation Tabs */}
+        <div style={{
+          height: '56px',
+          background: '#111',
+          borderBottom: '2px solid rgba(139, 38, 53, 0.3)',
+          display: 'flex',
+          alignItems: 'center',
+          padding: '0 20px',
+          gap: '8px'
+        }}>
+          {[
+            { id: 'dms', label: 'DMs', icon: '💬', note: '(bugs being fixed)' },
+            { id: 'school-chat', label: 'School Chat', icon: '🏫' },
+            { id: 'friends', label: 'Friends', icon: '👥', badge: friendRequests.received.length },
+            { id: 'proxy', label: 'Proxy', icon: '🌐', disabled: true, note: '(Coming Soon)' },
+            { id: 'music', label: 'Music', icon: '🎵', disabled: true, note: '(Coming Soon)' }
+          ].map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => !tab.disabled && handleTabChange(tab.id)}
+              disabled={tab.disabled}
+              style={{
+                padding: '10px 20px',
+                background: activeTab === tab.id 
+                  ? 'linear-gradient(135deg, #8B2635 0%, #C73E4A 100%)'
+                  : tab.disabled
+                    ? 'rgba(50, 50, 50, 0.3)'
+                    : 'rgba(139, 38, 53, 0.1)',
+                border: 'none',
+                borderRadius: '8px',
+                color: tab.disabled ? '#555' : '#fff',
+                cursor: tab.disabled ? 'not-allowed' : 'pointer',
+                fontSize: '14px',
+                fontWeight: '600',
+                transition: 'all 0.2s ease',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                fontFamily: "'DM Sans', sans-serif",
+                opacity: tab.disabled ? 0.5 : 1
+              }}
+              onMouseEnter={(e) => {
+                if (activeTab !== tab.id && !tab.disabled) {
+                  e.target.style.background = 'rgba(139, 38, 53, 0.2)';
+                }
+              }}
+              onMouseLeave={(e) => {
+                if (activeTab !== tab.id && !tab.disabled) {
+                  e.target.style.background = 'rgba(139, 38, 53, 0.1)';
+                }
+              }}
+            >
+              <span>{tab.icon}</span>
+              <span>{tab.label}</span>
+              {tab.badge > 0 && (
+                <span style={{
+                  padding: '2px 8px',
+                  background: '#ff4444',
+                  borderRadius: '10px',
+                  fontSize: '11px',
+                  fontWeight: '700',
+                  marginLeft: '6px',
+                  animation: 'pulse 2s ease-in-out infinite'
+                }}>
+                  {tab.badge}
+                </span>
+              )}
+              {tab.note && (
+                <span style={{ fontSize: '11px', opacity: 0.7 }}>{tab.note}</span>
+              )}
+            </button>
+          ))}
+        </div>
+
+        <div style={{
+          flex: 1,
+          display: 'flex',
+          overflow: 'hidden'
+        }}>
+          {/* Render different content based on active tab */}
+          {activeTab === 'friends' ? (
+            // Friends Tab Content
+            <div style={{
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              background: '#0d0d0d'
+            }}>
+              {!showAddFriend && friends.length === 0 && friendRequests.received.length === 0 ? (
+                // Initial "Add Friend" prompt when no friends
+                <div style={{
+                  flex: 1,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: '40px'
+                }}>
+                  <div style={{
+                    width: '120px',
+                    height: '120px',
+                    background: 'linear-gradient(135deg, #8B2635 0%, #C73E4A 100%)',
+                    borderRadius: '50%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: '60px',
+                    marginBottom: '32px',
+                    opacity: 0.3
+                  }}>
+                    👥
+                  </div>
+                  <h2 style={{
+                    fontSize: '28px',
+                    fontWeight: '700',
+                    marginBottom: '12px',
+                    color: '#fff'
+                  }}>
+                    No Friends Yet
+                  </h2>
+                  <p style={{
+                    fontSize: '16px',
+                    color: '#888',
+                    marginBottom: '32px',
+                    textAlign: 'center',
+                    maxWidth: '400px'
+                  }}>
+                    Start building your friend list by adding your classmates and school friends!
+                  </p>
+                  <button
+                    onClick={() => setShowAddFriend(true)}
+                    style={{
+                      padding: '14px 32px',
+                      background: 'linear-gradient(135deg, #8B2635 0%, #C73E4A 100%)',
+                      border: 'none',
+                      borderRadius: '10px',
+                      color: '#fff',
+                      cursor: 'pointer',
+                      fontSize: '16px',
+                      fontWeight: '600',
+                      transition: 'all 0.2s ease',
+                      boxShadow: '0 4px 20px rgba(139, 38, 53, 0.4)',
+                      fontFamily: "'DM Sans', sans-serif"
+                    }}
+                    onMouseEnter={(e) => {
+                      e.target.style.transform = 'translateY(-2px)';
+                      e.target.style.boxShadow = '0 8px 30px rgba(139, 38, 53, 0.5)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.target.style.transform = 'translateY(0)';
+                      e.target.style.boxShadow = '0 4px 20px rgba(139, 38, 53, 0.4)';
+                    }}
+                  >
+                    Add Your First Friend
+                  </button>
+                </div>
+              ) : !showAddFriend && friendRequests.received.length > 0 && friends.length === 0 ? (
+                // Show pending requests prominently when user has no friends yet
+                <div style={{
+                  flex: 1,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: '40px'
+                }}>
+                  <div style={{
+                    width: '120px',
+                    height: '120px',
+                    background: 'linear-gradient(135deg, #8B2635 0%, #C73E4A 100%)',
+                    borderRadius: '50%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: '60px',
+                    marginBottom: '32px',
+                    animation: 'pulse 2s ease-in-out infinite'
+                  }}>
+                    📬
+                  </div>
+                  <h2 style={{
+                    fontSize: '28px',
+                    fontWeight: '700',
+                    marginBottom: '12px',
+                    color: '#fff'
+                  }}>
+                    You Have Friend Requests!
+                  </h2>
+                  <p style={{
+                    fontSize: '16px',
+                    color: '#888',
+                    marginBottom: '32px',
+                    textAlign: 'center',
+                    maxWidth: '400px'
+                  }}>
+                    {friendRequests.received.length} {friendRequests.received.length === 1 ? 'person wants' : 'people want'} to be your friend
+                  </p>
+                  
+                  <div style={{
+                    width: '100%',
+                    maxWidth: '500px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '16px',
+                    marginBottom: '24px'
+                  }}>
+                    {friendRequests.received.map((request, index) => (
+                      <div key={index} style={{
+                        padding: '20px',
+                        background: 'rgba(139, 38, 53, 0.15)',
+                        border: '2px solid rgba(139, 38, 53, 0.4)',
+                        borderRadius: '16px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '16px'
+                      }}>
+                        <div style={{
+                          width: '60px',
+                          height: '60px',
+                          borderRadius: '50%',
+                          background: 'linear-gradient(135deg, #8B2635 0%, #C73E4A 100%)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          fontSize: '28px',
+                          fontWeight: '700',
+                          flexShrink: 0
+                        }}>
+                          {request.from.charAt(0).toUpperCase()}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{
+                            fontSize: '18px',
+                            fontWeight: '600',
+                            color: '#fff',
+                            marginBottom: '4px'
+                          }}>
+                            {request.from}
+                          </div>
+                          <div style={{
+                            fontSize: '14px',
+                            color: '#aaa'
+                          }}>
+                            {request.relationship.replace('-', ' ')}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => acceptFriendRequest(request.from, request.relationship)}
+                          style={{
+                            padding: '10px 20px',
+                            background: 'linear-gradient(135deg, #8B2635 0%, #C73E4A 100%)',
+                            border: 'none',
+                            borderRadius: '10px',
+                            color: '#fff',
+                            cursor: 'pointer',
+                            fontSize: '14px',
+                            fontWeight: '600',
+                            fontFamily: "'DM Sans', sans-serif",
+                            whiteSpace: 'nowrap'
+                          }}
+                        >
+                          Accept
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+
+                  <button
+                    onClick={() => setShowAddFriend(true)}
+                    style={{
+                      padding: '12px 24px',
+                      background: 'transparent',
+                      border: '1px solid rgba(139, 38, 53, 0.4)',
+                      borderRadius: '10px',
+                      color: '#fff',
+                      cursor: 'pointer',
+                      fontSize: '14px',
+                      fontWeight: '600',
+                      fontFamily: "'DM Sans', sans-serif"
+                    }}
+                  >
+                    + Add More Friends
+                  </button>
+                </div>
+              ) : showAddFriend ? (
+                // Add Friend Flow
+                <div style={{
+                  flex: 1,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: '40px'
+                }}>
+                  <div style={{
+                    width: '100%',
+                    maxWidth: '500px',
+                    background: 'rgba(20, 20, 20, 0.8)',
+                    backdropFilter: 'blur(20px)',
+                    borderRadius: '16px',
+                    padding: '32px',
+                    border: '1px solid rgba(139, 38, 53, 0.3)'
+                  }}>
+                    {!friendRelationship ? (
+                      // Step 1: Select Relationship
+                      <>
+                        <h2 style={{
+                          fontSize: '24px',
+                          fontWeight: '700',
+                          marginBottom: '12px',
+                          color: '#fff',
+                          textAlign: 'center'
+                        }}>
+                          How are you related to this person?
+                        </h2>
+                        <p style={{
+                          fontSize: '14px',
+                          color: '#888',
+                          marginBottom: '32px',
+                          textAlign: 'center'
+                        }}>
+                          This helps organize your friend list
+                        </p>
+                        
+                        <div style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '12px',
+                          marginBottom: '20px'
+                        }}>
+                          {[
+                            { value: 'classmate', label: 'Classmate', icon: '📝' },
+                            { value: 'school-relationship', label: 'School Relationship', icon: '💕' },
+                            { value: 'school-friend', label: 'School Friend Outside of Class', icon: '👋' },
+                            { value: 'other', label: 'Other', icon: '✨' }
+                          ].map(option => (
+                            <button
+                              key={option.value}
+                              onClick={() => setFriendRelationship(option.value)}
+                              style={{
+                                padding: '16px 20px',
+                                background: 'rgba(139, 38, 53, 0.1)',
+                                border: '2px solid rgba(139, 38, 53, 0.3)',
+                                borderRadius: '10px',
+                                color: '#fff',
+                                cursor: 'pointer',
+                                fontSize: '15px',
+                                fontWeight: '600',
+                                transition: 'all 0.2s ease',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '12px',
+                                fontFamily: "'DM Sans', sans-serif"
+                              }}
+                              onMouseEnter={(e) => {
+                                e.target.style.background = 'rgba(139, 38, 53, 0.2)';
+                                e.target.style.borderColor = '#8B2635';
+                                e.target.style.transform = 'translateX(4px)';
+                              }}
+                              onMouseLeave={(e) => {
+                                e.target.style.background = 'rgba(139, 38, 53, 0.1)';
+                                e.target.style.borderColor = 'rgba(139, 38, 53, 0.3)';
+                                e.target.style.transform = 'translateX(0)';
+                              }}
+                            >
+                              <span style={{ fontSize: '20px' }}>{option.icon}</span>
+                              <span>{option.label}</span>
+                            </button>
+                          ))}
+                        </div>
+
+                        <button
+                          onClick={() => {
+                            setShowAddFriend(false);
+                            handleTabChange(previousTab);
+                          }}
+                          style={{
+                            width: '100%',
+                            padding: '12px',
+                            background: 'transparent',
+                            border: '1px solid rgba(139, 38, 53, 0.3)',
+                            borderRadius: '8px',
+                            color: '#888',
+                            cursor: 'pointer',
+                            fontSize: '13px',
+                            fontWeight: '500',
+                            fontFamily: "'DM Sans', sans-serif"
+                          }}
+                        >
+                          or go back to {previousTab === 'school-chat' ? 'School Chat' : previousTab === 'dms' ? 'DMs' : 'previous tab'}
+                        </button>
+                      </>
+                    ) : !friendSearchName || searchResults.length === 0 ? (
+                      // Step 2: Search for User
+                      <>
+                        <button
+                          onClick={() => setFriendRelationship('')}
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            color: '#888',
+                            cursor: 'pointer',
+                            fontSize: '14px',
+                            marginBottom: '16px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            fontFamily: "'DM Sans', sans-serif"
+                          }}
+                        >
+                          ← Back
+                        </button>
+                        
+                        <h2 style={{
+                          fontSize: '24px',
+                          fontWeight: '700',
+                          marginBottom: '12px',
+                          color: '#fff',
+                          textAlign: 'center'
+                        }}>
+                          What is the {friendRelationship.replace('-', ' ')}'s name?
+                        </h2>
+                        <p style={{
+                          fontSize: '14px',
+                          color: '#888',
+                          marginBottom: '24px',
+                          textAlign: 'center'
+                        }}>
+                          Enter their exact username
+                        </p>
+
+                        <div style={{ marginBottom: '20px' }}>
+                          <input
+                            type="text"
+                            value={friendSearchName}
+                            onChange={(e) => setFriendSearchName(e.target.value)}
+                            onKeyPress={(e) => {
+                              if (e.key === 'Enter') {
+                                searchForUser();
+                              }
+                            }}
+                            placeholder="Enter their name..."
+                            autoFocus
+                            style={{
+                              width: '100%',
+                              padding: '16px',
+                              fontSize: '16px',
+                              background: 'rgba(30, 30, 30, 0.6)',
+                              border: '2px solid rgba(139, 38, 53, 0.3)',
+                              borderRadius: '10px',
+                              color: '#fff',
+                              outline: 'none',
+                              transition: 'all 0.3s ease',
+                              fontFamily: "'DM Sans', sans-serif"
+                            }}
+                            onFocus={(e) => {
+                              e.target.style.borderColor = '#8B2635';
+                              e.target.style.background = 'rgba(30, 30, 30, 0.9)';
+                            }}
+                            onBlur={(e) => {
+                              e.target.style.borderColor = 'rgba(139, 38, 53, 0.3)';
+                              e.target.style.background = 'rgba(30, 30, 30, 0.6)';
+                            }}
+                          />
+                        </div>
+
+                        <button
+                          onClick={searchForUser}
+                          disabled={!friendSearchName.trim()}
+                          style={{
+                            width: '100%',
+                            padding: '14px',
+                            background: friendSearchName.trim() 
+                              ? 'linear-gradient(135deg, #8B2635 0%, #C73E4A 100%)' 
+                              : 'rgba(139, 38, 53, 0.2)',
+                            border: 'none',
+                            borderRadius: '10px',
+                            color: friendSearchName.trim() ? '#fff' : '#666',
+                            cursor: friendSearchName.trim() ? 'pointer' : 'not-allowed',
+                            fontSize: '15px',
+                            fontWeight: '600',
+                            fontFamily: "'DM Sans', sans-serif"
+                          }}
+                        >
+                          Search for User
+                        </button>
+                      </>
+                    ) : (
+                      // Step 3: Send Friend Request
+                      <>
+                        <button
+                          onClick={() => {
+                            setFriendSearchName('');
+                            setSearchResults([]);
+                          }}
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            color: '#888',
+                            cursor: 'pointer',
+                            fontSize: '14px',
+                            marginBottom: '16px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            fontFamily: "'DM Sans', sans-serif"
+                          }}
+                        >
+                          ← Back
+                        </button>
+
+                        <h2 style={{
+                          fontSize: '24px',
+                          fontWeight: '700',
+                          marginBottom: '24px',
+                          color: '#fff',
+                          textAlign: 'center'
+                        }}>
+                          Send Friend Request?
+                        </h2>
+
+                        {searchResults.map((user, index) => (
+                          <div key={index} style={{
+                            padding: '20px',
+                            background: 'rgba(139, 38, 53, 0.1)',
+                            border: '1px solid rgba(139, 38, 53, 0.3)',
+                            borderRadius: '12px',
+                            marginBottom: '20px'
+                          }}>
+                            <div style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '16px',
+                              marginBottom: '16px'
+                            }}>
+                              <div style={{
+                                width: '60px',
+                                height: '60px',
+                                borderRadius: '50%',
+                                background: 'linear-gradient(135deg, #8B2635 0%, #C73E4A 100%)',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                fontSize: '24px',
+                                fontWeight: '700'
+                              }}>
+                                {user.name.charAt(0).toUpperCase()}
+                              </div>
+                              <div>
+                                <div style={{
+                                  fontSize: '20px',
+                                  fontWeight: '700',
+                                  color: '#fff',
+                                  marginBottom: '4px'
+                                }}>
+                                  {user.name}
+                                </div>
+                                <div style={{
+                                  fontSize: '14px',
+                                  color: '#888'
+                                }}>
+                                  {user.grade} • {user.school}
+                                </div>
+                              </div>
+                            </div>
+                            
+                            <div style={{
+                              padding: '12px',
+                              background: 'rgba(0, 0, 0, 0.3)',
+                              borderRadius: '8px',
+                              fontSize: '13px',
+                              color: '#aaa',
+                              marginBottom: '16px'
+                            }}>
+                              <strong style={{ color: '#fff' }}>Relationship:</strong> {friendRelationship.replace('-', ' ')}
+                            </div>
+
+                            <button
+                              onClick={() => sendFriendRequest(user)}
+                              style={{
+                                width: '100%',
+                                padding: '14px',
+                                background: 'linear-gradient(135deg, #8B2635 0%, #C73E4A 100%)',
+                                border: 'none',
+                                borderRadius: '10px',
+                                color: '#fff',
+                                cursor: 'pointer',
+                                fontSize: '15px',
+                                fontWeight: '600',
+                                fontFamily: "'DM Sans', sans-serif"
+                              }}
+                            >
+                              Send Friend Request
+                            </button>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                // Friends List View
+                <div style={{
+                  flex: 1,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  padding: '20px',
+                  overflowY: 'auto'
+                }}>
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: '24px'
+                  }}>
+                    <h2 style={{
+                      fontSize: '24px',
+                      fontWeight: '700',
+                      color: '#fff'
+                    }}>
+                      Your Friends
+                    </h2>
+                    {friendRequests.received.length > 0 && (
+                      <div style={{
+                        padding: '6px 12px',
+                        background: 'linear-gradient(135deg, #8B2635 0%, #C73E4A 100%)',
+                        borderRadius: '12px',
+                        fontSize: '13px',
+                        fontWeight: '700',
+                        animation: 'pulse 2s ease-in-out infinite'
+                      }}>
+                        {friendRequests.received.length} New Request{friendRequests.received.length > 1 ? 's' : ''}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Friend Requests */}
+                  {friendRequests.received.length > 0 && (
+                    <div style={{ marginBottom: '32px' }}>
+                      <h3 style={{
+                        fontSize: '16px',
+                        fontWeight: '600',
+                        color: '#888',
+                        marginBottom: '12px',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.5px'
+                      }}>
+                        Pending Requests ({friendRequests.received.length})
+                      </h3>
+                      <div style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
+                        gap: '16px',
+                        marginBottom: '16px'
+                      }}>
+                        {friendRequests.received.map((request, index) => (
+                          <div key={index} style={{
+                            padding: '16px',
+                            background: 'rgba(139, 38, 53, 0.15)',
+                            border: '1px solid rgba(139, 38, 53, 0.4)',
+                            borderRadius: '12px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '12px'
+                          }}>
+                            <div style={{
+                              width: '48px',
+                              height: '48px',
+                              borderRadius: '50%',
+                              background: 'linear-gradient(135deg, #8B2635 0%, #C73E4A 100%)',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              fontSize: '20px',
+                              fontWeight: '700',
+                              flexShrink: 0
+                            }}>
+                              {request.from.charAt(0).toUpperCase()}
+                            </div>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{
+                                fontSize: '16px',
+                                fontWeight: '600',
+                                color: '#fff',
+                                marginBottom: '2px'
+                              }}>
+                                {request.from}
+                              </div>
+                              <div style={{
+                                fontSize: '13px',
+                                color: '#888'
+                              }}>
+                                {request.relationship.replace('-', ' ')}
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => acceptFriendRequest(request.from, request.relationship)}
+                              style={{
+                                padding: '8px 16px',
+                                background: 'linear-gradient(135deg, #8B2635 0%, #C73E4A 100%)',
+                                border: 'none',
+                                borderRadius: '8px',
+                                color: '#fff',
+                                cursor: 'pointer',
+                                fontSize: '13px',
+                                fontWeight: '600',
+                                fontFamily: "'DM Sans', sans-serif"
+                              }}
+                            >
+                              Accept
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Friends Grid */}
+                  <div style={{
+                    flex: 1,
+                    overflowY: 'auto',
+                    marginBottom: '20px'
+                  }}>
+                    <div style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+                      gap: '16px'
+                    }}>
+                      {friends.map((friend, index) => (
+                        <div key={index} style={{
+                          padding: '16px',
+                          background: 'rgba(20, 20, 20, 0.8)',
+                          border: '1px solid rgba(139, 38, 53, 0.2)',
+                          borderRadius: '12px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '12px',
+                          transition: 'all 0.2s ease',
+                          cursor: 'pointer'
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = 'rgba(139, 38, 53, 0.1)';
+                          e.currentTarget.style.borderColor = 'rgba(139, 38, 53, 0.4)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = 'rgba(20, 20, 20, 0.8)';
+                          e.currentTarget.style.borderColor = 'rgba(139, 38, 53, 0.2)';
+                        }}
+                        >
+                          <div style={{
+                            width: '52px',
+                            height: '52px',
+                            borderRadius: '50%',
+                            background: 'linear-gradient(135deg, #8B2635 0%, #C73E4A 100%)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: '22px',
+                            fontWeight: '700',
+                            flexShrink: 0
+                          }}>
+                            {friend.name.charAt(0).toUpperCase()}
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{
+                              fontSize: '16px',
+                              fontWeight: '600',
+                              color: '#fff',
+                              marginBottom: '4px'
+                            }}>
+                              {friend.name}
+                            </div>
+                            <div style={{
+                              fontSize: '13px',
+                              color: '#888'
+                            }}>
+                              {friend.relationship.replace('-', ' ')}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Add Friend Button */}
+                  <button
+                    onClick={() => {
+                      setShowAddFriend(true);
+                      setFriendRelationship('');
+                      setFriendSearchName('');
+                      setSearchResults([]);
+                    }}
+                    style={{
+                      padding: '14px 24px',
+                      background: 'linear-gradient(135deg, #8B2635 0%, #C73E4A 100%)',
+                      border: 'none',
+                      borderRadius: '10px',
+                      color: '#fff',
+                      cursor: 'pointer',
+                      fontSize: '15px',
+                      fontWeight: '600',
+                      transition: 'all 0.2s ease',
+                      boxShadow: '0 4px 20px rgba(139, 38, 53, 0.4)',
+                      fontFamily: "'DM Sans', sans-serif",
+                      alignSelf: 'center'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.target.style.transform = 'translateY(-2px)';
+                      e.target.style.boxShadow = '0 8px 30px rgba(139, 38, 53, 0.5)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.target.style.transform = 'translateY(0)';
+                      e.target.style.boxShadow = '0 4px 20px rgba(139, 38, 53, 0.4)';
+                    }}
+                  >
+                    + Add Friends
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : activeTab === 'dms' ? (
+            // DMs Tab Content - Locked Down
+            <div style={{
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: '#0d0d0d',
+              padding: '40px'
+            }}>
+              <div style={{
+                textAlign: 'center',
+                maxWidth: '500px'
+              }}>
+                <div style={{ 
+                  fontSize: '80px', 
+                  marginBottom: '24px',
+                  animation: 'float 3s ease-in-out infinite'
+                }}>
+                  🔧
+                </div>
+                <h2 style={{ 
+                  fontSize: '28px', 
+                  fontWeight: '700', 
+                  marginBottom: '16px', 
+                  color: '#fff' 
+                }}>
+                  Sorry bugs are being fixed!
+                </h2>
+                <p style={{ 
+                  fontSize: '16px', 
+                  color: '#aaa',
+                  lineHeight: '1.6',
+                  marginBottom: '12px'
+                }}>
+                  Our DM systems are being fixed right now! We'll try to get your DMs fixed soon.
+                </p>
+                <p style={{ 
+                  fontSize: '15px', 
+                  color: '#888',
+                  lineHeight: '1.5',
+                  fontStyle: 'italic'
+                }}>
+                  Don't want the gossip spread around public convos!
+                </p>
+              </div>
+            </div>
+          ) : (
+            // School Chat Tab Content (original chat interface)
+            <>
         {/* Left Sidebar - Channels */}
         <div style={{
           width: '240px',
@@ -1245,6 +2311,10 @@ export default function CompleteSchoolChat() {
           </div>
         )}
 
+            </>
+          )}
+        </div>
+
         <style>{`
           @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
 
@@ -1261,6 +2331,11 @@ export default function CompleteSchoolChat() {
           @keyframes slideInRight {
             from { transform: translateX(100%); }
             to { transform: translateX(0); }
+          }
+
+          @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
           }
 
           ::-webkit-scrollbar {
